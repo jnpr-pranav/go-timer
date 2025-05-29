@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pcherukupall/go-timer"
+	"github.com/jnpr-pranav/go-timer"
 )
 
 // ExampleTimer demonstrates the basic usage of the Timer.
