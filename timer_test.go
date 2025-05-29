@@ -22,10 +22,6 @@ func TestNewTimer(t *testing.T) {
 	if timer.min != time.Duration(math.MaxInt64) {
 		t.Errorf("Expected min to be math.MaxInt64, got %v", timer.min)
 	}
-
-	if timer.mean != 0 {
-		t.Errorf("Expected mean to be 0, got %v", timer.mean)
-	}
 }
 
 func TestUpdate(t *testing.T) {
@@ -33,7 +29,10 @@ func TestUpdate(t *testing.T) {
 
 	// Test first update
 	start := time.Now().Add(-100 * time.Millisecond)
-	timer.Update(start)
+	err := timer.Update(start)
+	if err != nil {
+		t.Errorf("Unexpected error on first update: %v", err)
+	}
 
 	if timer.Count() != 1 {
 		t.Errorf("Expected count to be 1, got %d", timer.Count())
@@ -49,7 +48,10 @@ func TestUpdate(t *testing.T) {
 
 	// Test second update with smaller duration
 	start = time.Now().Add(-50 * time.Millisecond)
-	timer.Update(start)
+	err = timer.Update(start)
+	if err != nil {
+		t.Errorf("Unexpected error on second update: %v", err)
+	}
 
 	if timer.Count() != 2 {
 		t.Errorf("Expected count to be 2, got %d", timer.Count())
@@ -67,7 +69,10 @@ func TestUpdate(t *testing.T) {
 
 	// Test third update with larger duration
 	start = time.Now().Add(-200 * time.Millisecond)
-	timer.Update(start)
+	err = timer.Update(start)
+	if err != nil {
+		t.Errorf("Unexpected error on third update: %v", err)
+	}
 
 	if timer.Count() != 3 {
 		t.Errorf("Expected count to be 3, got %d", timer.Count())
@@ -88,7 +93,10 @@ func TestGetterMethods(t *testing.T) {
 	timer := NewTimer()
 
 	start := time.Now().Add(-100 * time.Millisecond)
-	timer.Update(start)
+	err := timer.Update(start)
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
 
 	if timer.Count() != 1 {
 		t.Errorf("Expected Count() to return 1, got %d", timer.Count())
@@ -111,12 +119,25 @@ func TestReset(t *testing.T) {
 	timer := NewTimer()
 
 	// Update a few times
-	timer.Update(time.Now().Add(-100 * time.Millisecond))
-	timer.Update(time.Now().Add(-200 * time.Millisecond))
+	err1 := timer.Update(time.Now().Add(-100 * time.Millisecond))
+	err2 := timer.Update(time.Now().Add(-200 * time.Millisecond))
 
-	// Verify timer has data
+	if err1 != nil || err2 != nil {
+		t.Errorf("Unexpected errors: %v, %v", err1, err2)
+	}
+
+	// Simulate overflow
+	timer.mutex.Lock()
+	timer.totalSum = math.MaxInt64
+	timer.sumOverflowed = true
+	timer.mutex.Unlock()
+
+	// Verify timer has data and overflow flag
 	if timer.Count() != 2 {
 		t.Errorf("Expected count to be 2 before reset, got %d", timer.Count())
+	}
+	if !timer.SumOverflowed() {
+		t.Errorf("Expected sumOverflowed to be true before reset")
 	}
 
 	// Reset the timer
@@ -138,6 +159,31 @@ func TestReset(t *testing.T) {
 	if timer.Mean() != 0 {
 		t.Errorf("Expected mean to be 0 after reset, got %v", timer.Mean())
 	}
+	if timer.SumOverflowed() {
+		t.Errorf("Expected sumOverflowed to be false after reset")
+	}
+}
+
+func TestObserve(t *testing.T) {
+	t0 := NewTimer()
+	// feed in 10ms, 20ms, 5ms
+	t0.Observe(10 * time.Millisecond)
+	t0.Observe(20 * time.Millisecond)
+	t0.Observe(5 * time.Millisecond)
+
+	if t0.Count() != 3 {
+		t.Fatalf("Count = %d; want 3", t0.Count())
+	}
+	if got, want := t0.Min(), 5*time.Millisecond; got != want {
+		t.Errorf("Min = %v; want %v", got, want)
+	}
+	if got, want := t0.Max(), 20*time.Millisecond; got != want {
+		t.Errorf("Max = %v; want %v", got, want)
+	}
+	// nearest‐nanosecond mean = (35_000_000ns + 1) / 3 = 11_666_667ns
+	if got, want := t0.Mean(), 11_666_667*time.Nanosecond; got != want {
+		t.Errorf("Mean = %v; want %v", got, want)
+	}
 }
 
 func TestString(t *testing.T) {
@@ -145,7 +191,10 @@ func TestString(t *testing.T) {
 
 	// Update once
 	start := time.Now().Add(-100 * time.Millisecond)
-	timer.Update(start)
+	err := timer.Update(start)
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
 
 	str := timer.String()
 
@@ -165,12 +214,122 @@ func TestString(t *testing.T) {
 	if !strings.Contains(str, "Mean:") {
 		t.Errorf("Expected string to contain 'Mean:', got %s", str)
 	}
+
+	if strings.Contains(str, "(sum overflowed, mean is approximate)") {
+		t.Errorf("Expected string NOT to contain overflow message, got %s", str)
+	}
+
+	// Simulate overflow
+	timer.mutex.Lock()
+	timer.totalSum = math.MaxInt64
+	timer.sumOverflowed = true
+	timer.mutex.Unlock()
+
+	strOverflow := timer.String()
+	if !strings.Contains(strOverflow, "(sum overflowed, mean is approximate)") {
+		t.Errorf("Expected string to contain overflow message, got %s", strOverflow)
+	}
+}
+
+func TestSumOverflow(t *testing.T) {
+	timer := NewTimer()
+
+	if timer.SumOverflowed() {
+		t.Errorf("Expected SumOverflowed to be false for a new timer")
+	}
+
+	// Simulate a large duration that doesn't overflow yet
+	err := timer.Update(time.Now().Add(-time.Duration(math.MaxInt64 / 2)))
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if timer.SumOverflowed() {
+		t.Errorf("Expected SumOverflowed to be false after one large update")
+	}
+	if timer.totalSum != math.MaxInt64/2 {
+		t.Errorf("Expected totalSum to be math.MaxInt64/2, got %d", timer.totalSum)
+	}
+
+	// Simulate another large duration that causes overflow
+	err = timer.Update(time.Now().Add(-time.Duration(math.MaxInt64/2 + 1000))) // 1000ns more to ensure overflow
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	if !timer.SumOverflowed() {
+		t.Errorf("Expected SumOverflowed to be true after overflow")
+	}
+	if timer.totalSum != math.MaxInt64 {
+		t.Errorf("Expected totalSum to be capped at math.MaxInt64, got %d", timer.totalSum)
+	}
+
+	// Add another small duration, sum should remain capped
+	currentSum := timer.totalSum
+	err = timer.Update(time.Now().Add(-time.Nanosecond))
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if timer.totalSum != currentSum {
+		t.Errorf("Expected totalSum to remain capped at %d after overflow, got %d", currentSum, timer.totalSum)
+	}
+	if !timer.SumOverflowed() {
+		t.Errorf("Expected SumOverflowed to remain true")
+	}
+
+	timer.Reset()
+	if timer.SumOverflowed() {
+		t.Errorf("Expected SumOverflowed to be false after reset")
+	}
+}
+
+func TestUpdateWithZeroTime(t *testing.T) {
+	timer := NewTimer()
+	err := timer.Update(time.Time{})
+	if err == nil {
+		t.Errorf("Expected error when updating with zero time, got nil")
+	}
+	if timer.Count() != 0 {
+		t.Errorf("Expected count to be 0 after zero time update, got %d", timer.Count())
+	}
+}
+
+func TestUpdateWithNegativeDuration(t *testing.T) {
+	timer := NewTimer()
+	// time.Now() is later than start, so duration is positive
+	// To simulate a negative duration effectively, we'd need to manipulate time.Now()
+	// or pass a start time that is in the future.
+	// The current implementation handles durNano < 0 by setting it to 0.
+	// Let's test this path by providing a start time that is in the future.
+	start := time.Now().Add(100 * time.Millisecond) // Start time in the future
+	err := timer.Update(start)
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	if timer.Count() != 1 {
+		t.Errorf("Expected count to be 1, got %d", timer.Count())
+	}
+	// Duration should be 0
+	if timer.Min() != 0 {
+		t.Errorf("Expected min to be 0 for negative duration, got %v", timer.Min())
+	}
+	if timer.Max() != 0 {
+		t.Errorf("Expected max to be 0 for negative duration, got %v", timer.Max())
+	}
+	if timer.Mean() != 0 {
+		t.Errorf("Expected mean to be 0 for negative duration, got %v", timer.Mean())
+	}
+	if timer.totalSum != 0 {
+		t.Errorf("Expected totalSum to be 0 for negative duration, got %v", timer.totalSum)
+	}
 }
 
 func TestConcurrentUpdates(t *testing.T) {
 	timer := NewTimer()
 	iterations := 100
 	var wg sync.WaitGroup
+	var errCount int
+	var mu sync.Mutex
 
 	wg.Add(iterations)
 	for i := 0; i < iterations; i++ {
@@ -179,11 +338,19 @@ func TestConcurrentUpdates(t *testing.T) {
 			// Vary the durations to test min/max functionality
 			delay := time.Duration(50+i%100) * time.Millisecond
 			start := time.Now().Add(-delay)
-			timer.Update(start)
+			if err := timer.Update(start); err != nil {
+				mu.Lock()
+				errCount++
+				mu.Unlock()
+			}
 		}(i)
 	}
 
 	wg.Wait()
+
+	if errCount > 0 {
+		t.Errorf("%d errors occurred during concurrent updates", errCount)
+	}
 
 	if timer.Count() != uint64(iterations) {
 		t.Errorf("Expected count to be %d after concurrent updates, got %d", iterations, timer.Count())
@@ -215,7 +382,10 @@ func TestUpdateWithDifferentDurations(t *testing.T) {
 
 	for _, duration := range durations {
 		start := time.Now().Add(-duration)
-		timer.Update(start)
+		err := timer.Update(start)
+		if err != nil {
+			t.Errorf("Unexpected error with duration %v: %v", duration, err)
+		}
 	}
 
 	if timer.Count() != uint64(len(durations)) {
@@ -242,7 +412,10 @@ func BenchmarkTimerUpdate(b *testing.B) {
 
 	idx := 0
 	for b.Loop() {
-		timer.Update(inputs[idx%100])
+		err := timer.Update(inputs[idx%100])
+		if err != nil {
+			b.Fatalf("unexpected error: %v", err)
+		}
 		idx++
 	}
 }
@@ -264,7 +437,8 @@ func BenchmarkTimerConcurrentUpdate(b *testing.B) {
 		for pb.Next() {
 			currentInput := inputs[localInputIndex%100]
 
-			timer.Update(currentInput)
+			// Ignore errors in benchmark
+			_ = timer.Update(currentInput)
 
 			localInputIndex++
 		}
